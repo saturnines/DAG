@@ -55,13 +55,20 @@ void ring_slab_reset(ring_slab_t *ring) {
 }
 
 void *ring_slab_head(const ring_slab_t *ring) {
-    return NULL
+    return (char *)ring->memory + (ring->head * ring->slot_size);
 }
 
 void *ring_slab_at(const ring_slab_t *ring, size_t index) {
-    return NULL
+    return (char *)ring->memory + (((ring->head + index) % ring->slot_count) * ring->slot_size);
 }
 
 void ring_slab_pop(ring_slab_t *ring) {
-    return NULL
+    ring->head = (ring->head + 1) % ring->slot_count;
+}
+
+void *ring_slab_alloc(ring_slab_t *ring) {
+    if (ring_slab_full(ring)) return NULL;
+    void *ptr = (char *)ring->memory + (ring->tail * ring->slot_size);
+    ring->tail = (ring->tail + 1) % ring->slot_count;
+    return ptr;
 }

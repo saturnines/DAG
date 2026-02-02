@@ -16,7 +16,7 @@ typedef struct {
 
 ring_slab_t *ring_slab_create(size_t slot_size, size_t slot_count);
 void ring_slab_destroy(ring_slab_t *ring);
-void *ring_slab_push(ring_slab_t *ring);    // alloc at tail
+void *ring_slab_alloc(ring_slab_t *ring);    // alloc at tail
 void ring_slab_pop(ring_slab_t *ring);      // free from head
 void *ring_slab_head(const ring_slab_t *ring);    // peek head
 size_t ring_slab_count(const ring_slab_t *ring);
