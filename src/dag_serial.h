@@ -1,0 +1,37 @@
+#ifndef DAG_SERIAL_H
+#define DAG_SERIAL_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
+#include "merkle_dag.h"
+
+/*
+ * Node wire format:
+ *   [klen:4][vlen:4][parent_count:4][key:klen][value:vlen][parents:32*parent_count]
+ *
+ * Hash is NOT serialized, recomputed on deserialize (content-addressed).
+ *
+ * Batch wire format:
+ *   [count:4][node1][node2]...[nodeN]
+ *
+ * Nodes are in topological order (depth ascending, hash tiebreaker).
+ */
+
+#define DAG_SERIAL_NODE_HEADER_SIZE 12  // klen + vlen + parent_count
+
+// Single node serialization
+ssize_t dag_node_serialize(dag_node_t *node, uint8_t *buf, size_t cap);
+ssize_t dag_node_serialized_size(dag_node_t *node);
+
+// Single node deserialization (adds to DAG)
+dag_node_t *dag_node_deserialize(merkle_dag_t *dag, const uint8_t *buf, size_t len, size_t *consumed);
+
+// Batch serialization (entire DAG in topo order)
+ssize_t dag_serialize_batch(merkle_dag_t *dag, uint8_t *buf, size_t cap);
+ssize_t dag_batch_serialized_size(merkle_dag_t *dag);
+
+// Batch deserialization (into fresh or existing DAG)
+int dag_deserialize_batch(merkle_dag_t *dag, const uint8_t *buf, size_t len);
+
+#endif // DAG_SERIAL_H
