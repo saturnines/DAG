@@ -1,6 +1,8 @@
 #include <stdlib.h>
 #include "ring_slab.h"
 
+#include <string.h>
+
 
 ring_slab_t *ring_slab_create(size_t slot_size, size_t slot_count) {
 
@@ -70,5 +72,6 @@ void *ring_slab_alloc(ring_slab_t *ring) {
     if (ring_slab_full(ring)) return NULL;
     void *ptr = (char *)ring->memory + (ring->tail * ring->slot_size);
     ring->tail = (ring->tail + 1) % ring->slot_count;
+    memset(ptr, 0, ring->slot_size);  // Zero out the slot
     return ptr;
 }
