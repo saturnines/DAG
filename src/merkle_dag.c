@@ -104,14 +104,16 @@ dag_node_t *dag_add(merkle_dag_t *dag,
     node->depth = 0;
     for (uint32_t i = 0; i < parent_count; i++) {
         dag_node_t *p = dag_find(dag, parents + (i * DAG_HASH_SIZE));
-        printf("DEBUG: dag_find returned %p\n", (void*)p);
         if (p) {
+            if (p->depth + 1 > node->depth) {
+                node->depth = p->depth + 1;
+            }
             dag_node_t *in_tips;
             HASH_FIND(hh_tips, dag->tips, p->hash, DAG_HASH_SIZE, in_tips);
-            printf("DEBUG: HASH_FIND in tips returned %p\n", (void*)in_tips);
             if (in_tips) {
+                size_t before = HASH_COUNT(dag->tips);
                 HASH_DELETE(hh_tips, dag->tips, in_tips);
-                printf("DEBUG: deleted from tips\n");
+                size_t after = HASH_COUNT(dag->tips);
             }
         }
     }
@@ -119,6 +121,11 @@ dag_node_t *dag_add(merkle_dag_t *dag,
     // add to nodes table
     HASH_ADD(hh, dag->nodes, hash, DAG_HASH_SIZE, node);
     HASH_ADD(hh_tips, dag->tips, hash, DAG_HASH_SIZE, node);
+
+    dag_node_t *dbg_iter, *dbg_tmp;
+    HASH_ITER(hh_tips, dag->tips, dbg_iter, dbg_tmp) {
+        printf("  tip node: %p\n", (void*)dbg_iter);
+    }
 
     return node;
 }
@@ -142,7 +149,48 @@ bool dag_parents_complete(merkle_dag_t *dag, dag_node_t *node) {
     return true;
 }
 size_t dag_tip_count(merkle_dag_t *dag) {
-    return HASH_COUNT(dag->tips);
+    return HASH_CNT(hh_tips, dag->tips);  // NOT HASH_COUNT
+}
+
+
+
+static int compare_hashes(const void *a, const void *b) {
+    return memcmp(a, b, DAG_HASH_SIZE);
+}
+
+void dag_root_hash(merkle_dag_t *dag, uint8_t *out) {
+    size_t count = dag_tip_count(dag);
+    if (count == 0) {
+        memset(out, 0, DAG_HASH_SIZE);
+        return;
+    }
+
+    // Collect all tip hashes
+    uint8_t *tip_hashes = malloc(count * DAG_HASH_SIZE);
+    if (!tip_hashes) {
+        memset(out, 0, DAG_HASH_SIZE);
+        return;
+    }
+
+    size_t i = 0;
+    dag_node_t *node, *tmp;
+    HASH_ITER(hh_tips, dag->tips, node, tmp) {
+        memcpy(tip_hashes + (i * DAG_HASH_SIZE), node->hash, DAG_HASH_SIZE);
+        i++;
+    }
+
+    // Sort for deterministic order
+    qsort(tip_hashes, count, DAG_HASH_SIZE, compare_hashes);
+
+    // Hash sorted tips
+    SHA256_CTX ctx;
+    sha256_init(&ctx);
+    for (i = 0; i < count; i++) {
+        sha256_update(&ctx, tip_hashes + (i * DAG_HASH_SIZE), DAG_HASH_SIZE);
+    }
+    sha256_final(&ctx, out);
+
+    free(tip_hashes);
 }
 
 void dag_get_tips(merkle_dag_t *dag, uint8_t *out, size_t *count) {
@@ -153,23 +201,9 @@ void dag_get_tips(merkle_dag_t *dag, uint8_t *out, size_t *count) {
         i++;
     }
     *count = i;
-}
 
-void dag_root_hash(merkle_dag_t *dag, uint8_t *out) {
-    if (dag_tip_count(dag) == 0) {
-        memset(out, 0, DAG_HASH_SIZE);
-        return;
-    }
-
-    SHA256_CTX ctx;
-    sha256_init(&ctx);
-
-    dag_node_t *node, *tmp;
-    HASH_ITER(hh_tips, dag->tips, node, tmp) {
-        sha256_update(&ctx, node->hash, DAG_HASH_SIZE);
-    }
-
-    sha256_final(&ctx, out);
+    // Sort for deterministic order
+    qsort(out, i, DAG_HASH_SIZE, compare_hashes);
 }
 
 
