@@ -38,6 +38,7 @@ merkle_dag_t *dag_create(size_t max_nodes, size_t arena_size) {
 
     dag->nodes = NULL;
     dag->tips = NULL;
+    dag->referenced_as_parent = NULL;
     return dag;
 }
 
@@ -45,6 +46,13 @@ void dag_destroy(merkle_dag_t *dag) {
     if (!dag) return;
     HASH_CLEAR(hh, dag->nodes);
     HASH_CLEAR(hh_tips, dag->tips);
+
+    hash_set_entry_t *ref, *tmp;
+    HASH_ITER(hh, dag->referenced_as_parent, ref, tmp) {
+        HASH_DELETE(hh, dag->referenced_as_parent, ref);
+        free(ref);
+    }
+
     ring_slab_destroy(dag->slab);
     arena_destroy(dag->arena);
     free(dag);
@@ -53,6 +61,14 @@ void dag_destroy(merkle_dag_t *dag) {
 void dag_reset(merkle_dag_t *dag) {
     HASH_CLEAR(hh, dag->nodes);
     HASH_CLEAR(hh_tips, dag->tips);
+
+
+    hash_set_entry_t *ref, *tmp;
+    HASH_ITER(hh, dag->referenced_as_parent, ref, tmp) {
+        HASH_DELETE(hh, dag->referenced_as_parent, ref);
+        free(ref);
+    }
+
     ring_slab_reset(dag->slab);
     arena_reset(dag->arena);
 }
@@ -100,10 +116,24 @@ dag_node_t *dag_add(merkle_dag_t *dag,
         node->parents = NULL;
     }
 
-    // compute depth
+    // compute depth AND track parent references
     node->depth = 0;
     for (uint32_t i = 0; i < parent_count; i++) {
-        dag_node_t *p = dag_find(dag, parents + (i * DAG_HASH_SIZE));
+        const uint8_t *parent_hash = parents + (i * DAG_HASH_SIZE);
+
+        // Mark this hash as referenced as a parent
+        hash_set_entry_t *ref;
+        HASH_FIND(hh, dag->referenced_as_parent, parent_hash, DAG_HASH_SIZE, ref);
+        if (!ref) {
+            ref = malloc(sizeof(hash_set_entry_t));
+            if (ref) {
+                memcpy(ref->hash, parent_hash, DAG_HASH_SIZE);
+                HASH_ADD(hh, dag->referenced_as_parent, hash, DAG_HASH_SIZE, ref);
+            }
+        }
+
+        // Update depth and remove parent from tips if it exists
+        dag_node_t *p = dag_find(dag, parent_hash);
         if (p) {
             if (p->depth + 1 > node->depth) {
                 node->depth = p->depth + 1;
@@ -111,16 +141,20 @@ dag_node_t *dag_add(merkle_dag_t *dag,
             dag_node_t *in_tips;
             HASH_FIND(hh_tips, dag->tips, p->hash, DAG_HASH_SIZE, in_tips);
             if (in_tips) {
-                size_t before = HASH_COUNT(dag->tips);
                 HASH_DELETE(hh_tips, dag->tips, in_tips);
-                size_t after = HASH_COUNT(dag->tips);
             }
         }
     }
 
     // add to nodes table
     HASH_ADD(hh, dag->nodes, hash, DAG_HASH_SIZE, node);
-    HASH_ADD(hh_tips, dag->tips, hash, DAG_HASH_SIZE, node);
+
+    // Only add to tips if NOT already referenced as a parent
+    hash_set_entry_t *already_parent;
+    HASH_FIND(hh, dag->referenced_as_parent, hash, DAG_HASH_SIZE, already_parent);
+    if (!already_parent) {
+        HASH_ADD(hh_tips, dag->tips, hash, DAG_HASH_SIZE, node);
+    }
 
     dag_node_t *dbg_iter, *dbg_tmp;
     HASH_ITER(hh_tips, dag->tips, dbg_iter, dbg_tmp) {

@@ -24,12 +24,17 @@ typedef struct dag_node {
 } dag_node_t;
 
 typedef struct {
+    uint8_t hash[DAG_HASH_SIZE];
+    UT_hash_handle hh;
+} hash_set_entry_t;
+
+typedef struct {
     dag_node_t  *nodes;              // uthash table of all nodes
     dag_node_t  *tips;               // uthash table of tips (no children yet)
+    hash_set_entry_t *referenced_as_parent;
     ring_slab_t *slab;               // fixed-size node allocation
     arena_t     *arena;              // variable-size data (keys/values/parents)
 } merkle_dag_t;
-
 // lifecycle
 merkle_dag_t *dag_create(size_t max_nodes, size_t arena_size);
 void          dag_destroy(merkle_dag_t *dag);
