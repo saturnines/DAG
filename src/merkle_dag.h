@@ -63,4 +63,11 @@ size_t        dag_count(merkle_dag_t *dag);
 typedef void (*dag_iter_fn)(dag_node_t *node, void *ctx);
 void          dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx);
 
+
+size_t dag_remove_by_hashes(merkle_dag_t *dag,
+                            const uint8_t *hashes, size_t count);
+
+
+size_t dag_collect_hashes(merkle_dag_t *dag, uint8_t *out, size_t max_count);
+
 #endif // DAG_MERKLE_DAG_H
