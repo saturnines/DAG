@@ -221,7 +221,6 @@ dag_node_t *dag_add(merkle_dag_t *dag,
     // copy key — FIX: free slab on arena failure
     node->key = arena_alloc(dag->arena, key_len);
     if (!node->key) {
-        ring_slab_free(dag->slab, node);
         return NULL;
     }
     memcpy(node->key, key, key_len);
@@ -229,8 +228,8 @@ dag_node_t *dag_add(merkle_dag_t *dag,
 
     // copy value
     node->value = arena_alloc(dag->arena, value_len);
+    node->value = arena_alloc(dag->arena, value_len);
     if (!node->value) {
-        ring_slab_free(dag->slab, node);
         return NULL;
     }
     memcpy(node->value, value, value_len);
@@ -241,7 +240,6 @@ dag_node_t *dag_add(merkle_dag_t *dag,
     if (parent_count > 0) {
         node->parents = arena_alloc(dag->arena, parent_count * DAG_HASH_SIZE);
         if (!node->parents) {
-            ring_slab_free(dag->slab, node);
             return NULL;
         }
         memcpy(node->parents, parents, parent_count * DAG_HASH_SIZE);
