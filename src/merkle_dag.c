@@ -228,7 +228,6 @@ dag_node_t *dag_add(merkle_dag_t *dag,
 
     // copy value
     node->value = arena_alloc(dag->arena, value_len);
-    node->value = arena_alloc(dag->arena, value_len);
     if (!node->value) {
         return NULL;
     }
@@ -351,9 +350,11 @@ void dag_root_hash(merkle_dag_t *dag, uint8_t *out) {
 }
 
 void dag_get_tips(merkle_dag_t *dag, uint8_t *out, size_t *count) {
+    size_t max = *count;  // caller sets max capacity
     size_t i = 0;
     dag_node_t *node, *tmp;
     HASH_ITER(hh_tips, dag->tips, node, tmp) {
+        if (i >= max) break;
         memcpy(out + (i * DAG_HASH_SIZE), node->hash, DAG_HASH_SIZE);
         i++;
     }

@@ -55,6 +55,7 @@ bool          dag_parents_complete(merkle_dag_t *dag, dag_node_t *node);
 
 // tips
 size_t        dag_tip_count(merkle_dag_t *dag);
+// Copy tip hashes into `out`,  Output is sorted by hash for deterministic ordering.
 void          dag_get_tips(merkle_dag_t *dag, uint8_t *out, size_t *count);
 void          dag_root_hash(merkle_dag_t *dag, uint8_t *out);
 
