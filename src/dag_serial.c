@@ -215,3 +215,66 @@ int dag_deserialize_batch(merkle_dag_t *dag, const uint8_t *buf, size_t len) {
     
     return (int)count;
 }
+
+// ============================================================================
+// Selective batch serialization (Item 3: only drain confirmed writes)
+// ============================================================================
+
+typedef struct {
+    uint8_t *buf;
+    size_t   cap;
+    size_t   written;
+    uint32_t count;
+    int      error;
+} serialize_excl_ctx_t;
+
+static void serialize_one_counting(dag_node_t *node, void *ctx) {
+    serialize_excl_ctx_t *s = (serialize_excl_ctx_t *)ctx;
+    if (s->error) return;
+
+    ssize_t needed = dag_node_serialized_size(node);
+    if (needed < 0 || s->written + (size_t)needed > s->cap) {
+        s->error = 1;
+        return;
+    }
+
+    ssize_t wrote = dag_node_serialize(node, s->buf + s->written,
+                                        s->cap - s->written);
+    if (wrote < 0) {
+        s->error = 1;
+        return;
+    }
+
+    s->written += (size_t)wrote;
+    s->count++;
+}
+
+ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t cap,
+                                       const uint8_t *exclude, size_t excl_count) {
+    if (!dag) return -1;
+    if (!buf || cap < 4) return -4;
+
+    if (!exclude || excl_count == 0) {
+        return dag_serialize_batch(dag, buf, cap);
+    }
+
+    // Reserve 4 bytes for count — we'll patch it after iterating
+    serialize_excl_ctx_t ctx = {
+        .buf = buf + 4,
+        .cap = cap - 4,
+        .written = 0,
+        .count = 0,
+        .error = 0,
+    };
+
+    dag_iter_topo_excluding(dag, serialize_one_counting, &ctx, exclude, excl_count);
+
+    if (ctx.error) {
+        return -(ssize_t)(4 + ctx.written + 1024);
+    }
+
+    // Patch count
+    memcpy(buf, &ctx.count, 4);
+
+    return (ssize_t)(4 + ctx.written);
+}

@@ -31,6 +31,20 @@ dag_node_t *dag_node_deserialize(merkle_dag_t *dag, const uint8_t *buf, size_t l
 ssize_t dag_serialize_batch(merkle_dag_t *dag, uint8_t *buf, size_t cap);
 ssize_t dag_batch_serialized_size(merkle_dag_t *dag);
 
+/**
+ * Serialize DAG batch excluding nodes in the exclusion set.
+ * Used by leader to skip unconfirmed writes when proposing.
+ *
+ * @param dag        The DAG
+ * @param buf        Output buffer
+ * @param cap        Buffer capacity
+ * @param exclude    Flat buffer of 32-byte hashes to skip
+ * @param excl_count Number of hashes in exclude
+ * @return           Bytes written, or negative on error
+ */
+ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t cap,
+                                       const uint8_t *exclude, size_t excl_count);
+
 // Batch deserialization (into fresh or existing DAG)
 int dag_deserialize_batch(merkle_dag_t *dag, const uint8_t *buf, size_t len);
 

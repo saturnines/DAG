@@ -429,3 +429,47 @@ void dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx) {
 
     free(nodes);
 }
+
+static int hash_in_set(const uint8_t *hash, const uint8_t *set, size_t set_count) {
+    for (size_t i = 0; i < set_count; i++) {
+        if (memcmp(hash, set + (i * DAG_HASH_SIZE), DAG_HASH_SIZE) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
+                              const uint8_t *exclude, size_t excl_count) {
+    if (!exclude || excl_count == 0) {
+        dag_iter_topo(dag, fn, ctx);
+        return;
+    }
+
+    size_t count = dag_count(dag);
+    if (count == 0) return;
+
+    dag_node_t **nodes = malloc(count * sizeof(dag_node_t *));
+    if (!nodes) return;
+
+    size_t i = 0;
+    dag_node_t *node, *tmp;
+    HASH_ITER(hh, dag->nodes, node, tmp) {
+        node->depth = UINT32_MAX;
+        nodes[i++] = node;
+    }
+
+    for (size_t j = 0; j < count; j++) {
+        recompute_depth(nodes[j], dag);
+    }
+
+    qsort(nodes, count, sizeof(dag_node_t *), compare_nodes);
+
+    for (size_t j = 0; j < count; j++) {
+        if (!hash_in_set(nodes[j]->hash, exclude, excl_count)) {
+            fn(nodes[j], ctx);
+        }
+    }
+
+    free(nodes);
+}

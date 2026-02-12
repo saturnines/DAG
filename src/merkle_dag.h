@@ -64,6 +64,19 @@ size_t        dag_count(merkle_dag_t *dag);
 typedef void (*dag_iter_fn)(dag_node_t *node, void *ctx);
 void          dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx);
 
+/**
+ * Iterate in topo order, skipping nodes whose hashes appear in the
+ * exclusion set.  Used by propose to skip unconfirmed leader writes.
+ *
+ * @param dag       The DAG
+ * @param fn        Callback per node
+ * @param ctx       User context
+ * @param exclude   Flat buffer of 32-byte hashes to skip
+ * @param excl_count Number of hashes in exclude
+ */
+void          dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
+                                      const uint8_t *exclude, size_t excl_count);
+
 
 size_t dag_remove_by_hashes(merkle_dag_t *dag,
                             const uint8_t *hashes, size_t count);
