@@ -231,7 +231,8 @@ static void handle_nodes(gossip_t *g, int from, const uint8_t *data, size_t len,
     size_t remaining = len - 4;
 
     // Track hashes of missing parents
-    uint8_t *missing = malloc(count * DAG_HASH_SIZE * 4);  // Worst case: 4 parents per node
+    size_t missing_cap = count * 4;  // Worst case: 4 parents per node
+    uint8_t *missing = malloc(missing_cap * DAG_HASH_SIZE);
     uint32_t missing_count = 0;
 
     for (uint32_t i = 0; i < count; i++) {
@@ -253,12 +254,11 @@ static void handle_nodes(gossip_t *g, int from, const uint8_t *data, size_t len,
                             break;
                         }
                     }
-                    if (!already && missing) {
-                        if (missing_count < count * 4) {
-                            memcpy(missing + missing_count * DAG_HASH_SIZE, parent_hash, DAG_HASH_SIZE);
-                            missing_count++;
-                        }
+                    if (!already && missing && missing_count < missing_cap) {
+                        memcpy(missing + missing_count * DAG_HASH_SIZE, parent_hash, DAG_HASH_SIZE);
+                        missing_count++;
                     }
+                }
             }
         }
 
