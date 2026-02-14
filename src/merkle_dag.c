@@ -211,51 +211,57 @@ dag_node_t *dag_add(merkle_dag_t *dag,
         return dag_find(dag, hash);
     }
 
+    // Single contiguous arena allocation with framing header.
+    // Layout: [key_len:4][value_len:4][parent_count:4][key][value][parents]
+    size_t parents_size = parent_count * DAG_HASH_SIZE;
+    size_t total = 4 + 4 + 4 + key_len + value_len + parents_size;
+
+    uint8_t *block = arena_alloc(dag->arena, total);
+    if (!block) return NULL;
+
     // now allocate node from slab
     dag_node_t *node = ring_slab_alloc(dag->slab);
-    if (!node) return NULL;
+    if (!node) return NULL;  // arena bytes leaked, reclaimed on reset
+
+    // Write header
+    uint32_t klen32 = (uint32_t)key_len;
+    uint32_t vlen32 = (uint32_t)value_len;
+    uint32_t pcount32 = parent_count;
+    memcpy(block,     &klen32,   4);
+    memcpy(block + 4, &vlen32,   4);
+    memcpy(block + 8, &pcount32, 4);
+
+    // Write data and set node pointers into the block
+    uint8_t *p = block + 12;
+
+    memcpy(p, key, key_len);
+    node->key = p;
+    node->key_len = key_len;
+    p += key_len;
+
+    memcpy(p, value, value_len);
+    node->value = p;
+    node->value_len = value_len;
+    p += value_len;
+
+    if (parent_count > 0) {
+        memcpy(p, parents, parents_size);
+        node->parents = p;
+    } else {
+        node->parents = NULL;
+    }
+    node->parent_count = parent_count;
 
     // copy hash
     memcpy(node->hash, hash, DAG_HASH_SIZE);
 
-    // copy key — FIX: free slab on arena failure
-    node->key = arena_alloc(dag->arena, key_len);
-    if (!node->key) {
-        return NULL;
-    }
-    memcpy(node->key, key, key_len);
-    node->key_len = key_len;
-
-    // copy value
-    node->value = arena_alloc(dag->arena, value_len);
-    if (!node->value) {
-        return NULL;
-    }
-    memcpy(node->value, value, value_len);
-    node->value_len = value_len;
-
-    // copy parents
-    node->parent_count = parent_count;
-    if (parent_count > 0) {
-        node->parents = arena_alloc(dag->arena, parent_count * DAG_HASH_SIZE);
-        if (!node->parents) {
-            return NULL;
-        }
-        memcpy(node->parents, parents, parent_count * DAG_HASH_SIZE);
-    } else {
-        node->parents = NULL;
-    }
-
-    // Depth is 0 here — recomputed at sort time in dag_iter_topo().
-    // This avoids the bug where out-of-order gossip delivery causes
-    // wrong depth when child arrives before parent.
+    // Depth recomputed at sort time in dag_iter_topo()
     node->depth = 0;
 
     // Track parent references and update tips
     for (uint32_t i = 0; i < parent_count; i++) {
         const uint8_t *parent_hash = parents + (i * DAG_HASH_SIZE);
 
-        // Mark this hash as referenced as a parent
         hash_set_entry_t *ref;
         HASH_FIND(hh, dag->referenced_as_parent, parent_hash, DAG_HASH_SIZE, ref);
         if (!ref) {
@@ -266,11 +272,10 @@ dag_node_t *dag_add(merkle_dag_t *dag,
             }
         }
 
-        // Remove parent from tips if it exists (it's no longer a tip)
-        dag_node_t *p = dag_find(dag, parent_hash);
-        if (p) {
+        dag_node_t *par = dag_find(dag, parent_hash);
+        if (par) {
             dag_node_t *in_tips;
-            HASH_FIND(hh_tips, dag->tips, p->hash, DAG_HASH_SIZE, in_tips);
+            HASH_FIND(hh_tips, dag->tips, par->hash, DAG_HASH_SIZE, in_tips);
             if (in_tips) {
                 HASH_DELETE(hh_tips, dag->tips, in_tips);
             }
@@ -472,4 +477,83 @@ void dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
     }
 
     free(nodes);
+}
+
+// Note: maybe add a per-block checksum or a trailing magic word.
+
+merkle_dag_t *dag_create_durable(size_t max_nodes, size_t arena_size,
+                                  const char *arena_path) {
+    merkle_dag_t *dag = malloc(sizeof(merkle_dag_t));
+    if (!dag) return NULL;
+
+    dag->slab = ring_slab_create(sizeof(dag_node_t), max_nodes);
+    if (!dag->slab) {
+        free(dag);
+        return NULL;
+    }
+
+    dag->arena = arena_create_mmap(arena_size, arena_path);
+    if (!dag->arena) {
+        ring_slab_destroy(dag->slab);
+        free(dag);
+        return NULL;
+    }
+
+    dag->nodes = NULL;
+    dag->tips = NULL;
+    dag->referenced_as_parent = NULL;
+    return dag;
+}
+
+
+int dag_recover_from_arena(merkle_dag_t *dag) {
+    if (!dag || !dag->arena || !dag->arena->is_mmap) return 0;
+
+    uint8_t *mem = (uint8_t *)dag->arena->memory;
+    size_t cap = dag->arena->capacity;
+    size_t offset = 0;
+    int count = 0;
+
+    while (offset + 12 <= cap) {
+        uint8_t *block = mem + offset;
+
+        uint32_t klen, vlen, pcount;
+        memcpy(&klen, block, 4);
+        memcpy(&vlen, block + 4, 4);
+        memcpy(&pcount, block + 8, 4);
+
+        // Zero header means end of data (arena was zeroed past used)
+        if (klen == 0 && vlen == 0 && pcount == 0) break;
+
+        // Sanity checks
+        size_t parents_size = pcount * DAG_HASH_SIZE;
+        size_t total = 12 + klen + vlen + parents_size;
+        size_t aligned = (total + 7) & ~7;
+
+        if (offset + total > cap) break;  // truncated entry
+        if (klen > 1024 * 1024 || vlen > 16 * 1024 * 1024) break;  // corrupt
+
+        uint8_t *key = block + 12;
+        uint8_t *value = key + klen;
+        uint8_t *parents = (pcount > 0) ? value + vlen : NULL;
+
+        // dag_add computes hash and deduplicates.
+        // It will try to arena_alloc — but the data is already in the
+        // arena from the mmap. We need to reconstruct without double-allocating.
+        dag_add(dag, key, klen, value, vlen, parents, pcount);
+        count++;
+
+        offset += aligned;
+    }
+
+    // Set arena->used to the end of what we walked, so new allocs
+    // append after recovered data.
+    dag->arena->used = offset;
+
+    return count;
+}
+
+int dag_msync(merkle_dag_t *dag, size_t offset, size_t len) {
+    if (!dag || !dag->arena) return -1;
+    return arena_msync(dag->arena, offset, len);
 }
