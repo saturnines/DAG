@@ -254,10 +254,11 @@ static void handle_nodes(gossip_t *g, int from, const uint8_t *data, size_t len,
                         }
                     }
                     if (!already && missing) {
-                        memcpy(missing + missing_count * DAG_HASH_SIZE, parent_hash, DAG_HASH_SIZE);
-                        missing_count++;
+                        if (missing_count < count * 4) {
+                            memcpy(missing + missing_count * DAG_HASH_SIZE, parent_hash, DAG_HASH_SIZE);
+                            missing_count++;
+                        }
                     }
-                }
             }
         }
 
