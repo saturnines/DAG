@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#endif
+
 
 arena_t *arena_create(size_t capacity) {
     if (!capacity) return NULL;
