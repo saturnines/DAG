@@ -20,13 +20,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(uthash)
 
 add_library(dagger
-        src/ring_slab.c
         src/arena.c
         src/merkle_dag.c
         ${sha256_SOURCE_DIR}/sha256.c
         src/dag_serial.c
         src/dag_serial.h
         src/gossip.c
+        src/node_pool.c
+        src/node_pool.h
 )
 
 target_include_directories(dagger PUBLIC
