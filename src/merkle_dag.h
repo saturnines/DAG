@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "uthash.h"
-#include "ring_slab.h"
+#include "node_pool.h"
 #include "arena.h"
 
 #define DAG_HASH_SIZE 32
@@ -32,7 +32,7 @@ typedef struct {
     dag_node_t  *nodes;              // uthash table of all nodes
     dag_node_t  *tips;               // uthash table of tips (no children yet)
     hash_set_entry_t *referenced_as_parent;
-    ring_slab_t *slab;               // fixed-size node allocation
+    node_pool_t *pool;               // fixed-size node allocation
     arena_t     *arena;              // variable-size data (keys/values/parents)
 } merkle_dag_t;
 // lifecycle
@@ -69,7 +69,7 @@ void          dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx);
 merkle_dag_t *dag_create_durable(size_t max_nodes, size_t arena_size,
                                   const char *arena_path);
 
-// Walk the mmap'd arena, reconstruct hash tables and slab.
+// Walk the mmap'd arena, reconstruct hash tables and pool.
 // Call on startup before Raft. Returns number of nodes recovered.
 int dag_recover_from_arena(merkle_dag_t *dag);
 

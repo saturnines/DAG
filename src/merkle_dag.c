@@ -21,15 +21,15 @@ merkle_dag_t *dag_create(size_t max_nodes, size_t arena_size) {
     merkle_dag_t *dag = malloc(sizeof(merkle_dag_t));
     if (!dag) return NULL;
 
-    dag->slab = ring_slab_create(sizeof(dag_node_t), max_nodes);
-    if (!dag->slab) {
+    dag->pool = node_pool_create(sizeof(dag_node_t), max_nodes);
+    if (!dag->pool) {
         free(dag);
         return NULL;
     }
 
     dag->arena = arena_create(arena_size);
     if (!dag->arena) {
-        ring_slab_destroy(dag->slab);
+        node_pool_destroy(dag->pool);
         free(dag);
         return NULL;
     }
@@ -51,7 +51,7 @@ void dag_destroy(merkle_dag_t *dag) {
         free(ref);
     }
 
-    ring_slab_destroy(dag->slab);
+    node_pool_destroy(dag->pool);
     arena_destroy(dag->arena);
     free(dag);
 }
@@ -66,7 +66,7 @@ void dag_reset(merkle_dag_t *dag) {
         free(ref);
     }
 
-    ring_slab_reset(dag->slab);
+    node_pool_reset(dag->pool);
     arena_reset(dag->arena);
 }
 
@@ -79,10 +79,8 @@ void dag_reset(merkle_dag_t *dag) {
  * Nodes NOT in the list survive.  Tips and referenced_as_parent
  * are rebuilt from the remaining nodes.
  *
- * Slab/arena memory for removed nodes is NOT individually freed —
- * those are bulk allocators.  Hash table entries are removed so
- * the nodes become unreachable.  If the DAG is now empty, a full
- * slab/arena reset reclaims everything.
+ * Pool memory for removed nodes is returned to the freelist.
+ * If the DAG is now empty, a full pool/arena reset reclaims everything.
  *
  * @return Number of nodes actually removed.
  */
@@ -109,12 +107,13 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
 
         // Remove from nodes
         HASH_DELETE(hh, dag->nodes, node);
+        node_pool_free(dag->pool, node);
         removed++;
     }
 
     if (removed == 0) return 0;
 
-    // If DAG is now empty, full reset reclaims slab/arena
+    // If DAG is now empty, full reset reclaims pool/arena
     if (HASH_COUNT(dag->nodes) == 0) {
         HASH_CLEAR(hh_tips, dag->tips);
 
@@ -124,7 +123,7 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
             free(ref);
         }
 
-        ring_slab_reset(dag->slab);
+        node_pool_reset(dag->pool);
         arena_reset(dag->arena);
         return removed;
     }
@@ -219,8 +218,8 @@ dag_node_t *dag_add(merkle_dag_t *dag,
     uint8_t *block = arena_alloc(dag->arena, total);
     if (!block) return NULL;
 
-    // now allocate node from slab
-    dag_node_t *node = ring_slab_alloc(dag->slab);
+    // now allocate node from pool
+    dag_node_t *node = node_pool_alloc(dag->pool);
     if (!node) return NULL;  // arena bytes leaked, reclaimed on reset
 
     // Write header
@@ -486,15 +485,15 @@ merkle_dag_t *dag_create_durable(size_t max_nodes, size_t arena_size,
     merkle_dag_t *dag = malloc(sizeof(merkle_dag_t));
     if (!dag) return NULL;
 
-    dag->slab = ring_slab_create(sizeof(dag_node_t), max_nodes);
-    if (!dag->slab) {
+    dag->pool = node_pool_create(sizeof(dag_node_t), max_nodes);
+    if (!dag->pool) {
         free(dag);
         return NULL;
     }
 
     dag->arena = arena_create_mmap(arena_size, arena_path);
     if (!dag->arena) {
-        ring_slab_destroy(dag->slab);
+        node_pool_destroy(dag->pool);
         free(dag);
         return NULL;
     }
