@@ -301,34 +301,26 @@ dag_node_t *dag_add(merkle_dag_t *dag,
 
     /* ---- Fix up orphans that this node completes ---- */
     {
-        dag_node_t *child, *child_tmp;
-        HASH_ITER(hh, dag->nodes, child, child_tmp) {
-            if (child == node) continue;
-            if (child->parent_count == 0) continue;
-            if (child->depth != 0) continue;
+        bool fixed_any = true;
+        while (fixed_any) {
+            fixed_any = false;
+            dag_node_t *child, *child_tmp;
+            HASH_ITER(hh, dag->nodes, child, child_tmp) {
+                if (child->parent_count == 0) continue;
+                if (child->depth != 0) continue;
+                if (!dag_parents_complete(dag, child)) continue;
 
-            bool is_parent = false;
-            for (uint32_t i = 0; i < child->parent_count; i++) {
-                if (memcmp(child->parents + (i * DAG_HASH_SIZE),
-                           node->hash, DAG_HASH_SIZE) == 0) {
-                    is_parent = true;
-                    break;
+                uint32_t max_d = 0;
+                for (uint32_t i = 0; i < child->parent_count; i++) {
+                    dag_node_t *par = dag_find(dag,
+                        child->parents + (i * DAG_HASH_SIZE));
+                    if (par && par->depth + 1 > max_d)
+                        max_d = par->depth + 1;
                 }
+                child->depth = max_d;
+                key_index_update(dag, child);
+                fixed_any = true;
             }
-            if (!is_parent) continue;
-
-            if (!dag_parents_complete(dag, child)) continue;
-
-            uint32_t max_d = 0;
-            for (uint32_t i = 0; i < child->parent_count; i++) {
-                dag_node_t *par = dag_find(dag,
-                    child->parents + (i * DAG_HASH_SIZE));
-                if (par && par->depth + 1 > max_d) {
-                    max_d = par->depth + 1;
-                }
-            }
-            child->depth = max_d;
-            key_index_update(dag, child);
         }
     }
 
