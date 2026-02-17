@@ -225,12 +225,14 @@ typedef struct {
     size_t   cap;
     size_t   written;
     uint32_t count;
+    uint32_t max_count;    // 0 = no limit
     int      error;
 } serialize_excl_ctx_t;
 
 static void serialize_one_counting(dag_node_t *node, void *ctx) {
     serialize_excl_ctx_t *s = (serialize_excl_ctx_t *)ctx;
     if (s->error) return;
+    if (s->max_count > 0 && s->count >= s->max_count) return;
 
     ssize_t needed = dag_node_serialized_size(node);
     if (needed < 0 || s->written + (size_t)needed > s->cap) {
@@ -250,11 +252,12 @@ static void serialize_one_counting(dag_node_t *node, void *ctx) {
 }
 
 ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t cap,
-                                       const uint8_t *exclude, size_t excl_count) {
+                                       const uint8_t *exclude, size_t excl_count,
+                                       uint32_t max_count) {
     if (!dag) return -1;
     if (!buf || cap < 4) return -4;
 
-    if (!exclude || excl_count == 0) {
+    if ((!exclude || excl_count == 0) && max_count == 0) {
         return dag_serialize_batch(dag, buf, cap);
     }
 
@@ -264,6 +267,7 @@ ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t ca
         .cap = cap - 4,
         .written = 0,
         .count = 0,
+        .max_count = max_count,
         .error = 0,
     };
 
