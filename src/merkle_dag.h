@@ -8,6 +8,8 @@
 #include "node_pool.h"
 #include "arena.h"
 
+
+
 #define DAG_HASH_SIZE 32
 
 typedef struct dag_node {
@@ -28,13 +30,18 @@ typedef struct {
     UT_hash_handle hh;
 } hash_set_entry_t;
 
+typedef struct key_index_entry key_index_entry_t;
+
 typedef struct {
-    dag_node_t  *nodes;              // uthash table of all nodes
-    dag_node_t  *tips;               // uthash table of tips (no children yet)
+    dag_node_t  *nodes;
+    dag_node_t  *tips;
     hash_set_entry_t *referenced_as_parent;
-    node_pool_t *pool;               // fixed-size node allocation
-    arena_t     *arena;              // variable-size data (keys/values/parents)
+    key_index_entry_t *key_index;
+    node_pool_t *pool;
+    arena_t     *arena;
 } merkle_dag_t;
+
+
 // lifecycle
 merkle_dag_t *dag_create(size_t max_nodes, size_t arena_size);
 void          dag_destroy(merkle_dag_t *dag);

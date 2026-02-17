@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "merkle_dag.h"
-
+#include "dag_key_index.h"
 #include "sha256.h"
 
 static void compute_hash(uint8_t *out,
@@ -16,6 +16,9 @@ static void compute_hash(uint8_t *out,
     sha256_final(&ctx, out);
 }
 
+// ============================================================================
+// Lifecycle
+// ============================================================================
 
 merkle_dag_t *dag_create(size_t max_nodes, size_t arena_size) {
     merkle_dag_t *dag = malloc(sizeof(merkle_dag_t));
@@ -37,6 +40,7 @@ merkle_dag_t *dag_create(size_t max_nodes, size_t arena_size) {
     dag->nodes = NULL;
     dag->tips = NULL;
     dag->referenced_as_parent = NULL;
+    dag->key_index = NULL;
     return dag;
 }
 
@@ -51,6 +55,7 @@ void dag_destroy(merkle_dag_t *dag) {
         free(ref);
     }
 
+    key_index_clear(dag);
     node_pool_destroy(dag->pool);
     arena_destroy(dag->arena);
     free(dag);
@@ -66,31 +71,21 @@ void dag_reset(merkle_dag_t *dag) {
         free(ref);
     }
 
+    key_index_clear(dag);
     node_pool_reset(dag->pool);
     arena_reset(dag->arena);
 }
 
 // ============================================================================
-// BUG FIX #1: Selective Removal
+// Selective Removal
 // ============================================================================
 
-/**
- * Remove only nodes whose hashes appear in the provided list.
- * Nodes NOT in the list survive.  Tips and referenced_as_parent
- * are rebuilt from the remaining nodes.
- *
- * Pool memory for removed nodes is returned to the freelist.
- * If the DAG is now empty, a full pool/arena reset reclaims everything.
- *
- * @return Number of nodes actually removed.
- */
 size_t dag_remove_by_hashes(merkle_dag_t *dag,
                             const uint8_t *hashes, size_t count) {
     if (!dag || !hashes || count == 0) return 0;
 
     size_t removed = 0;
 
-    // Phase 1: Remove targeted nodes from nodes table and tips
     for (size_t i = 0; i < count; i++) {
         const uint8_t *hash = hashes + (i * DAG_HASH_SIZE);
 
@@ -98,14 +93,12 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
         HASH_FIND(hh, dag->nodes, hash, DAG_HASH_SIZE, node);
         if (!node) continue;
 
-        // Remove from tips if present
         dag_node_t *in_tips;
         HASH_FIND(hh_tips, dag->tips, hash, DAG_HASH_SIZE, in_tips);
         if (in_tips) {
             HASH_DELETE(hh_tips, dag->tips, in_tips);
         }
 
-        // Remove from nodes
         HASH_DELETE(hh, dag->nodes, node);
         node_pool_free(dag->pool, node);
         removed++;
@@ -113,7 +106,6 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
 
     if (removed == 0) return 0;
 
-    // If DAG is now empty, full reset reclaims pool/arena
     if (HASH_COUNT(dag->nodes) == 0) {
         HASH_CLEAR(hh_tips, dag->tips);
 
@@ -123,12 +115,13 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
             free(ref);
         }
 
+        key_index_clear(dag);
         node_pool_reset(dag->pool);
         arena_reset(dag->arena);
         return removed;
     }
 
-    // Phase 2: Rebuild referenced_as_parent from remaining nodes
+    /* Rebuild referenced_as_parent */
     {
         hash_set_entry_t *ref, *tmp;
         HASH_ITER(hh, dag->referenced_as_parent, ref, tmp) {
@@ -156,7 +149,7 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
         }
     }
 
-    // Phase 3: Rebuild tips — remaining nodes not referenced as parent
+    /* Rebuild tips */
     HASH_CLEAR(hh_tips, dag->tips);
 
     HASH_ITER(hh, dag->nodes, n, ntmp) {
@@ -168,17 +161,17 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
         }
     }
 
+    /* Rebuild key index from remaining nodes */
+    key_index_clear(dag);
+    HASH_ITER(hh, dag->nodes, n, ntmp) {
+        if (n->parent_count == 0 || dag_parents_complete(dag, n)) {
+            key_index_update(dag, n);
+        }
+    }
+
     return removed;
 }
 
-/**
- * Collect all node hashes in the DAG into a flat buffer.
- *
- * @param dag       The DAG
- * @param out       Output buffer (caller provides max_count * DAG_HASH_SIZE bytes)
- * @param max_count Maximum hashes to collect
- * @return          Number of hashes written
- */
 size_t dag_collect_hashes(merkle_dag_t *dag, uint8_t *out, size_t max_count) {
     if (!dag || !out) return 0;
 
@@ -201,28 +194,25 @@ dag_node_t *dag_add(merkle_dag_t *dag,
                     const uint8_t *value, size_t value_len,
                     const uint8_t *parents, uint32_t parent_count) {
 
-    // compute hash first from inputs
     uint8_t hash[DAG_HASH_SIZE];
     compute_hash(hash, key, key_len, value, value_len, parents, parent_count);
 
-    // check dedup before allocating anything
     if (dag_has(dag, hash)) {
         return dag_find(dag, hash);
     }
 
-    // Single contiguous arena allocation with framing header.
-    // Layout: [key_len:4][value_len:4][parent_count:4][key][value][parents]
+    /* Single contiguous arena allocation with framing header.
+     * Layout: [key_len:4][value_len:4][parent_count:4][key][value][parents] */
     size_t parents_size = parent_count * DAG_HASH_SIZE;
     size_t total = 4 + 4 + 4 + key_len + value_len + parents_size;
 
     uint8_t *block = arena_alloc(dag->arena, total);
     if (!block) return NULL;
 
-    // now allocate node from pool
     dag_node_t *node = node_pool_alloc(dag->pool);
-    if (!node) return NULL;  // arena bytes leaked, reclaimed on reset
+    if (!node) return NULL;
 
-    // Write header
+    /* Write header */
     uint32_t klen32 = (uint32_t)key_len;
     uint32_t vlen32 = (uint32_t)value_len;
     uint32_t pcount32 = parent_count;
@@ -230,7 +220,7 @@ dag_node_t *dag_add(merkle_dag_t *dag,
     memcpy(block + 4, &vlen32,   4);
     memcpy(block + 8, &pcount32, 4);
 
-    // Write data and set node pointers into the block
+    /* Write data and set node pointers into the block */
     uint8_t *p = block + 12;
 
     memcpy(p, key, key_len);
@@ -251,13 +241,10 @@ dag_node_t *dag_add(merkle_dag_t *dag,
     }
     node->parent_count = parent_count;
 
-    // copy hash
     memcpy(node->hash, hash, DAG_HASH_SIZE);
 
-    // Depth recomputed at sort time in dag_iter_topo()
-    node->depth = 0;
+    /* ---- Track parent references and update tips ---- */
 
-    // Track parent references and update tips
     for (uint32_t i = 0; i < parent_count; i++) {
         const uint8_t *parent_hash = parents + (i * DAG_HASH_SIZE);
 
@@ -281,18 +268,76 @@ dag_node_t *dag_add(merkle_dag_t *dag,
         }
     }
 
-    // add to nodes table
+    /* ---- Add to nodes table ---- */
+
     HASH_ADD(hh, dag->nodes, hash, DAG_HASH_SIZE, node);
 
-    // Only add to tips if NOT already referenced as a parent
+    /* ---- Add to tips if not already referenced as parent ---- */
+
     hash_set_entry_t *already_parent;
     HASH_FIND(hh, dag->referenced_as_parent, hash, DAG_HASH_SIZE, already_parent);
     if (!already_parent) {
         HASH_ADD(hh_tips, dag->tips, hash, DAG_HASH_SIZE, node);
     }
 
+    /* ---- Eager depth computation + key index ---- */
+
+    if (parent_count == 0) {
+        node->depth = 0;
+        key_index_update(dag, node);
+    } else if (dag_parents_complete(dag, node)) {
+        uint32_t max_depth = 0;
+        for (uint32_t i = 0; i < parent_count; i++) {
+            dag_node_t *par = dag_find(dag, parents + (i * DAG_HASH_SIZE));
+            if (par && par->depth + 1 > max_depth) {
+                max_depth = par->depth + 1;
+            }
+        }
+        node->depth = max_depth;
+        key_index_update(dag, node);
+    } else {
+        node->depth = 0;
+    }
+
+    /* ---- Fix up orphans that this node completes ---- */
+    {
+        dag_node_t *child, *child_tmp;
+        HASH_ITER(hh, dag->nodes, child, child_tmp) {
+            if (child == node) continue;
+            if (child->parent_count == 0) continue;
+            if (child->depth != 0) continue;
+
+            bool is_parent = false;
+            for (uint32_t i = 0; i < child->parent_count; i++) {
+                if (memcmp(child->parents + (i * DAG_HASH_SIZE),
+                           node->hash, DAG_HASH_SIZE) == 0) {
+                    is_parent = true;
+                    break;
+                }
+            }
+            if (!is_parent) continue;
+
+            if (!dag_parents_complete(dag, child)) continue;
+
+            uint32_t max_d = 0;
+            for (uint32_t i = 0; i < child->parent_count; i++) {
+                dag_node_t *par = dag_find(dag,
+                    child->parents + (i * DAG_HASH_SIZE));
+                if (par && par->depth + 1 > max_d) {
+                    max_d = par->depth + 1;
+                }
+            }
+            child->depth = max_d;
+            key_index_update(dag, child);
+        }
+    }
+
     return node;
 }
+
+// ============================================================================
+// Lookup
+// ============================================================================
 
 dag_node_t *dag_find(merkle_dag_t *dag, const uint8_t *hash) {
     dag_node_t *node;
@@ -312,6 +357,10 @@ bool dag_parents_complete(merkle_dag_t *dag, dag_node_t *node) {
     }
     return true;
 }
+
+// ============================================================================
+// Tips
+// ============================================================================
 
 size_t dag_tip_count(merkle_dag_t *dag) {
     return HASH_CNT(hh_tips, dag->tips);
@@ -354,7 +403,7 @@ void dag_root_hash(merkle_dag_t *dag, uint8_t *out) {
 }
 
 void dag_get_tips(merkle_dag_t *dag, uint8_t *out, size_t *count) {
-    size_t max = *count;  // caller sets max capacity
+    size_t max = *count;
     size_t i = 0;
     dag_node_t *node, *tmp;
     HASH_ITER(hh_tips, dag->tips, node, tmp) {
@@ -367,12 +416,14 @@ void dag_get_tips(merkle_dag_t *dag, uint8_t *out, size_t *count) {
     qsort(out, i, DAG_HASH_SIZE, compare_hashes);
 }
 
-
 size_t dag_count(merkle_dag_t *dag) {
     return HASH_COUNT(dag->nodes);
 }
 
-// Topo ?
+// ============================================================================
+// Topo Sort
+// ============================================================================
+
 static uint32_t recompute_depth(dag_node_t *node, merkle_dag_t *dag) {
     if (node->depth != UINT32_MAX) return node->depth;
 
@@ -388,7 +439,6 @@ static uint32_t recompute_depth(dag_node_t *node, merkle_dag_t *dag) {
                 max_parent_depth = pd + 1;
             }
         }
-
     }
 
     node->depth = max_parent_depth;
@@ -411,7 +461,6 @@ void dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx) {
     dag_node_t **nodes = malloc(count * sizeof(dag_node_t *));
     if (!nodes) return;
 
-    // Collect all nodes, mark depths as uncomputed
     size_t i = 0;
     dag_node_t *node, *tmp;
     HASH_ITER(hh, dag->nodes, node, tmp) {
@@ -419,12 +468,10 @@ void dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx) {
         nodes[i++] = node;
     }
 
-    // Recompute depths from actual parent structure
     for (size_t j = 0; j < count; j++) {
         recompute_depth(nodes[j], dag);
     }
 
-    // Sort: depth ascending (roots first), hash for deterministic tiebreak
     qsort(nodes, count, sizeof(dag_node_t *), compare_nodes);
 
     for (size_t j = 0; j < count; j++) {
@@ -478,7 +525,9 @@ void dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
     free(nodes);
 }
 
-// Note: maybe add a per-block checksum or a trailing magic word.
+// ============================================================================
+// Durable DAG (mmap-backed)
+// ============================================================================
 
 merkle_dag_t *dag_create_durable(size_t max_nodes, size_t arena_size,
                                   const char *arena_path) {
@@ -501,9 +550,9 @@ merkle_dag_t *dag_create_durable(size_t max_nodes, size_t arena_size,
     dag->nodes = NULL;
     dag->tips = NULL;
     dag->referenced_as_parent = NULL;
+    dag->key_index = NULL;
     return dag;
 }
-
 
 int dag_recover_from_arena(merkle_dag_t *dag) {
     if (!dag || !dag->arena || !dag->arena->is_mmap) return 0;
@@ -521,32 +570,25 @@ int dag_recover_from_arena(merkle_dag_t *dag) {
         memcpy(&vlen, block + 4, 4);
         memcpy(&pcount, block + 8, 4);
 
-        // Zero header means end of data (arena was zeroed past used)
         if (klen == 0 && vlen == 0 && pcount == 0) break;
 
-        // Sanity checks
         size_t parents_size = pcount * DAG_HASH_SIZE;
         size_t total = 12 + klen + vlen + parents_size;
         size_t aligned = (total + 7) & ~7;
 
-        if (offset + total > cap) break;  // truncated entry
-        if (klen > 1024 * 1024 || vlen > 16 * 1024 * 1024) break;  // corrupt
+        if (offset + total > cap) break;
+        if (klen > 1024 * 1024 || vlen > 16 * 1024 * 1024) break;
 
         uint8_t *key = block + 12;
         uint8_t *value = key + klen;
         uint8_t *parents = (pcount > 0) ? value + vlen : NULL;
 
-        // dag_add computes hash and deduplicates.
-        // It will try to arena_alloc — but the data is already in the
-        // arena from the mmap. We need to reconstruct without double-allocating.
         dag_add(dag, key, klen, value, vlen, parents, pcount);
         count++;
 
         offset += aligned;
     }
 
-    // Set arena->used to the end of what we walked, so new allocs
-    // append after recovered data.
     dag->arena->used = offset;
 
     return count;

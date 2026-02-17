@@ -28,6 +28,7 @@ add_library(dagger
         src/gossip.c
         src/node_pool.c
         src/node_pool.h
+        src/dag_key_index.h
 )
 
 target_include_directories(dagger PUBLIC
