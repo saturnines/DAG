@@ -53,6 +53,18 @@ static inline dag_node_t *dag_get_latest(merkle_dag_t *dag,
     return entry ? entry->winner : NULL;
 }
 
+/* ---- Remove a key from the index ---- */
+
+static inline void key_index_remove(merkle_dag_t *dag,
+                                     const uint8_t *key, size_t key_len) {
+    key_index_entry_t *entry;
+    HASH_FIND(hh, dag->key_index, key, key_len, entry);
+    if (entry) {
+        HASH_DEL(dag->key_index, entry);
+        free(entry);
+    }
+}
+
 /* ---- Cleanup ---- */
 
 static inline void key_index_clear(merkle_dag_t *dag) {
