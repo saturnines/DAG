@@ -17,11 +17,20 @@ typedef struct key_index_entry {
 /* ---- Compare: same rule as compare_nodes in topo sort ---- */
 
 static inline int dag_node_wins(dag_node_t *candidate, dag_node_t *current) {
+    /* Leader-sequenced: higher leader_seq wins (§4.4 total order) */
+    if (candidate->leader_seq > 0 && current->leader_seq > 0) {
+        return candidate->leader_seq > current->leader_seq;
+    }
+    /* Sequenced beats unsequenced */
+    if (candidate->leader_seq > 0) return 1;
+    if (current->leader_seq > 0) return 0;
+    /* Fallback for unsequenced nodes (DAG sync / recovery) */
     if (candidate->depth > current->depth) return 1;
     if (candidate->depth == current->depth &&
         memcmp(candidate->hash, current->hash, DAG_HASH_SIZE) > 0) return 1;
     return 0;
 }
+
 
 /* ---- Update index for one node ---- */
 

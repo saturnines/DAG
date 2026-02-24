@@ -21,6 +21,7 @@ typedef struct dag_node {
     uint8_t *parents;                // arena allocated, array of 32-byte hashes
     uint32_t parent_count;
     uint32_t depth;                  // max(parent depths) + 1, for topo sort
+    uint64_t leader_seq;        // Leader-assigned total order (§4): (term << 32) | counter
     UT_hash_handle hh;               // for nodes table
     UT_hash_handle hh_tips;          // for tips table
 } dag_node_t;

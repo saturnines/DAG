@@ -8,7 +8,7 @@
 
 /*
  * Node wire format:
- *   [klen:4][vlen:4][parent_count:4][key:klen][value:vlen][parents:32*parent_count]
+ *   [klen:4][vlen:4][parent_count:4][leader_seq:8][key:klen][value:vlen][parents:32*parent_count]
  *
  * Hash is NOT serialized, recomputed on deserialize (content-addressed).
  *
@@ -18,7 +18,7 @@
  * Nodes are in topological order (depth ascending, hash tiebreaker).
  */
 
-#define DAG_SERIAL_NODE_HEADER_SIZE 12  // klen + vlen + parent_count
+#define DAG_SERIAL_NODE_HEADER_SIZE 20   // klen + vlen + parent_count
 
 // Single node serialization
 ssize_t dag_node_serialize(dag_node_t *node, uint8_t *buf, size_t cap);
