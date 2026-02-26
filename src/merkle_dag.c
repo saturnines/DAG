@@ -161,10 +161,14 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
         }
     }
 
-    /* Rebuild key index from remaining nodes */
+    /* Rebuild key index from remaining nodes.
+     * Fix #9: Don't gate on parent completeness — leader_seq determines
+     * the total order for reads, independent of DAG parentage.  Gating
+     * on parents_complete caused nodes with removed parents to vanish
+     * from the index, producing stale reads. */
     key_index_clear(dag);
     HASH_ITER(hh, dag->nodes, n, ntmp) {
-        if (n->parent_count == 0 || dag_parents_complete(dag, n)) {
+        if (n->leader_seq > 0) {
             key_index_update(dag, n);
         }
     }
@@ -296,7 +300,15 @@ dag_node_t *dag_add(merkle_dag_t *dag,
         node->depth = max_depth;
         key_index_update(dag, node);
     } else {
-        node->depth = 0;
+        /*
+         * Fix #8: Use UINT32_MAX sentinel for "depth unresolved"
+         * instead of 0.  Depth 0 is valid for root nodes, so using
+         * it as a sentinel caused the fix-up loop to skip real
+         * orphans whose parents happened to also be orphans at
+         * depth 0.  UINT32_MAX matches the convention in
+         * recompute_depth() for topo sort.
+         */
+        node->depth = UINT32_MAX;
     }
 
     /* ---- Fix up orphans that this node completes ---- */
@@ -307,14 +319,15 @@ dag_node_t *dag_add(merkle_dag_t *dag,
             dag_node_t *child, *child_tmp;
             HASH_ITER(hh, dag->nodes, child, child_tmp) {
                 if (child->parent_count == 0) continue;
-                if (child->depth != 0) continue;
+                if (child->depth != UINT32_MAX) continue;  /* Fix #8: sentinel */
                 if (!dag_parents_complete(dag, child)) continue;
 
                 uint32_t max_d = 0;
                 for (uint32_t i = 0; i < child->parent_count; i++) {
                     dag_node_t *par = dag_find(dag,
                         child->parents + (i * DAG_HASH_SIZE));
-                    if (par && par->depth + 1 > max_d)
+                    if (par && par->depth != UINT32_MAX
+                        && par->depth + 1 > max_d)
                         max_d = par->depth + 1;
                 }
                 child->depth = max_d;
@@ -566,7 +579,7 @@ int dag_recover_from_arena(merkle_dag_t *dag) {
 
         size_t parents_size = pcount * DAG_HASH_SIZE;
         size_t total = 12 + klen + vlen + parents_size;
-        size_t aligned = (total + 7) & ~7;
+        size_t aligned = (total + 7) & ~7;  // matches arena_alloc 8-byte alignment
 
         if (offset + total > cap) break;
         if (klen > 1024 * 1024 || vlen > 16 * 1024 * 1024) break;

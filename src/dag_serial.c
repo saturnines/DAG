@@ -89,7 +89,13 @@ dag_node_t *dag_node_deserialize(merkle_dag_t *dag, const uint8_t *buf,
 
     dag_node_t *node = dag_add(dag, key, klen, value, vlen, parents, pcount);
 
-    if (node && lseq > 0) {
+    if (node && lseq > 0 && node->leader_seq == 0) {
+        /* Fix #10: Only assign leader_seq to unordered nodes.
+         * If the node already has a nonzero leader_seq (arrived via
+         * a different peer or earlier push), don't clobber it.
+         * leader_seq assignment is deterministic from the leader,
+         * so duplicates SHOULD carry the same value, but this guard
+         * prevents silent corruption if they don't. */
         node->leader_seq = lseq;
         key_index_update(dag, node);
     }
