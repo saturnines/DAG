@@ -44,7 +44,8 @@ ssize_t dag_batch_serialized_size(merkle_dag_t *dag);
  */
 ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t cap,
                                        const uint8_t *exclude, size_t excl_count,
-                                       uint32_t max_count);
+                                       uint32_t max_count,
+                                       uint8_t *out_hashes, size_t *out_hash_count);
 
 // Batch deserialization (into fresh or existing DAG)
 int dag_deserialize_batch(merkle_dag_t *dag, const uint8_t *buf, size_t len);

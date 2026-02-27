@@ -237,6 +237,8 @@ typedef struct {
     uint32_t count;
     uint32_t max_count;
     int      error;
+    uint8_t *out_hashes;
+    size_t  *out_hash_count;
 } serialize_excl_ctx_t;
 
 static void serialize_one_counting(dag_node_t *node, void *ctx) {
@@ -263,13 +265,16 @@ static void serialize_one_counting(dag_node_t *node, void *ctx) {
 
 ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t cap,
                                        const uint8_t *exclude, size_t excl_count,
-                                       uint32_t max_count) {
+                                       uint32_t max_count,
+                                       uint8_t *out_hashes, size_t *out_hash_count) {
     if (!dag) return -1;
     if (!buf || cap < 4) return -4;
 
     if ((!exclude || excl_count == 0) && max_count == 0) {
         return dag_serialize_batch(dag, buf, cap);
     }
+
+    if (out_hash_count) *out_hash_count = 0;
 
     serialize_excl_ctx_t ctx = {
         .buf = buf + 4,
@@ -278,6 +283,8 @@ ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t ca
         .count = 0,
         .max_count = max_count,
         .error = 0,
+        .out_hashes = out_hashes,
+        .out_hash_count = out_hash_count,
     };
 
     dag_iter_topo_excluding(dag, serialize_one_counting, &ctx, exclude, excl_count);
@@ -287,6 +294,5 @@ ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t ca
     }
 
     memcpy(buf, &ctx.count, 4);
-
     return (ssize_t)(4 + ctx.written);
 }
