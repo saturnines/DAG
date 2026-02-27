@@ -1,5 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <time.h>
 #include "merkle_dag.h"
 #include "dag_key_index.h"
 #include "sha256.h"
@@ -367,11 +369,15 @@ dag_node_t *dag_add(merkle_dag_t *dag,
 
     /* ---- Fix up orphans that this node completes ---- */
     {
+        struct timespec _orf0, _orf1;
+        clock_gettime(CLOCK_MONOTONIC, &_orf0);
+        size_t _scan_count = 0;
         bool fixed_any = true;
         while (fixed_any) {
             fixed_any = false;
             dag_node_t *child, *child_tmp;
             HASH_ITER(hh, dag->nodes, child, child_tmp) {
+                _scan_count++;
                 if (child->parent_count == 0) continue;
                 if (child->depth != UINT32_MAX) continue;  /* Fix #8: sentinel */
                 if (!dag_parents_complete(dag, child)) continue;
@@ -389,6 +395,12 @@ dag_node_t *dag_add(merkle_dag_t *dag,
                 fixed_any = true;
             }
         }
+        clock_gettime(CLOCK_MONOTONIC, &_orf1);
+        uint64_t _orf_us = (_orf1.tv_sec - _orf0.tv_sec) * 1000000
+                         + (_orf1.tv_nsec - _orf0.tv_nsec) / 1000;
+        if (_orf_us > 50)
+            fprintf(stderr, "ORPHAN_FIXUP: nodes=%u scanned=%zu took=%luus\n",
+                    HASH_COUNT(dag->nodes), _scan_count, (unsigned long)_orf_us);
     }
 
     return node;
