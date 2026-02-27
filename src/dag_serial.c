@@ -261,6 +261,17 @@ static void serialize_one_counting(dag_node_t *node, void *ctx) {
 
     s->written += (size_t)wrote;
     s->count++;
+
+    /* Fix #11: Actually collect serialized node hashes so
+     * propose_dag_batch can remove them from the DAG immediately.
+     * Without this, ser_count stays 0, dag_remove_by_hashes never
+     * runs on propose, and the DAG grows unbounded — causing the
+     * progressive throughput decay (9k → 6k → 3k → 771). */
+    if (s->out_hashes && s->out_hash_count) {
+        memcpy(s->out_hashes + (*s->out_hash_count * DAG_HASH_SIZE),
+               node->hash, DAG_HASH_SIZE);
+        (*s->out_hash_count)++;
+    }
 }
 
 ssize_t dag_serialize_batch_excluding(merkle_dag_t *dag, uint8_t *buf, size_t cap,
