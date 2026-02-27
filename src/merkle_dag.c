@@ -201,9 +201,9 @@ dag_node_t *dag_add(merkle_dag_t *dag,
     uint8_t hash[DAG_HASH_SIZE];
     compute_hash(hash, key, key_len, value, value_len, parents, parent_count);
 
-    if (dag_has(dag, hash)) {
-        return dag_find(dag, hash);
-    }
+    dag_node_t *existing;
+    HASH_FIND(hh, dag->nodes, hash, DAG_HASH_SIZE, existing);
+    if (existing) return existing;
 
     /* Single contiguous arena allocation with framing header.
      * Layout: [key_len:4][value_len:4][parent_count:4][key][value][parents] */
@@ -486,14 +486,11 @@ void dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx) {
     free(nodes);
 }
 
-static int hash_in_set(const uint8_t *hash, const uint8_t *set, size_t set_count) {
-    for (size_t i = 0; i < set_count; i++) {
-        if (memcmp(hash, set + (i * DAG_HASH_SIZE), DAG_HASH_SIZE) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
+/* Temporary hash set for O(1) exclusion checks */
+typedef struct {
+    uint8_t         hash[DAG_HASH_SIZE];
+    UT_hash_handle  hh;
+} excl_entry_t;
 
 void dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
                               const uint8_t *exclude, size_t excl_count) {
@@ -505,8 +502,17 @@ void dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
     size_t count = dag_count(dag);
     if (count == 0) return;
 
+    /* Build O(1) exclusion set */
+    excl_entry_t *excl_set = NULL;
+    for (size_t i = 0; i < excl_count; i++) {
+        excl_entry_t *e = malloc(sizeof(excl_entry_t));
+        if (!e) continue;
+        memcpy(e->hash, exclude + (i * DAG_HASH_SIZE), DAG_HASH_SIZE);
+        HASH_ADD(hh, excl_set, hash, DAG_HASH_SIZE, e);
+    }
+
     dag_node_t **nodes = malloc(count * sizeof(dag_node_t *));
-    if (!nodes) return;
+    if (!nodes) goto cleanup;
 
     size_t i = 0;
     dag_node_t *node, *tmp;
@@ -522,12 +528,23 @@ void dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
     qsort(nodes, count, sizeof(dag_node_t *), compare_nodes);
 
     for (size_t j = 0; j < count; j++) {
-        if (!hash_in_set(nodes[j]->hash, exclude, excl_count)) {
+        excl_entry_t *found = NULL;
+        HASH_FIND(hh, excl_set, nodes[j]->hash, DAG_HASH_SIZE, found);
+        if (!found) {
             fn(nodes[j], ctx);
         }
     }
 
     free(nodes);
+
+cleanup:
+    {
+        excl_entry_t *e, *etmp;
+        HASH_ITER(hh, excl_set, e, etmp) {
+            HASH_DELETE(hh, excl_set, e);
+            free(e);
+        }
+    }
 }
 
 // ============================================================================
