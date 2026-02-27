@@ -91,7 +91,7 @@ void arena_destroy(arena_t *arena) {
 
     free(arena);
 }
-
+//
 void *arena_alloc(arena_t *arena, size_t size) {
     size = (size + 7) & ~7;  // 8-byte align
     if (size > arena_remaining(arena)) {
