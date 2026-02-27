@@ -86,6 +86,19 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
 
     size_t removed = 0;
 
+    /* Phase 1: Build set of hashes being removed (for O(1) lookup) */
+    hash_set_entry_t *remove_set = NULL;
+    for (size_t i = 0; i < count; i++) {
+        hash_set_entry_t *e = malloc(sizeof(hash_set_entry_t));
+        if (!e) continue;
+        memcpy(e->hash, hashes + (i * DAG_HASH_SIZE), DAG_HASH_SIZE);
+        e->refcount = 0;
+        HASH_ADD(hh, remove_set, hash, DAG_HASH_SIZE, e);
+    }
+
+    /* Phase 2: Remove nodes, fix parent refcounts + tips incrementally.
+     * Also track which key_index entries need re-evaluation. */
+
     for (size_t i = 0; i < count; i++) {
         const uint8_t *hash = hashes + (i * DAG_HASH_SIZE);
 
@@ -93,10 +106,56 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
         HASH_FIND(hh, dag->nodes, hash, DAG_HASH_SIZE, node);
         if (!node) continue;
 
+        /* Check if this node is the key_index winner for its key */
+        key_index_entry_t *ki;
+        HASH_FIND(hh, dag->key_index, node->key, node->key_len, ki);
+        if (ki && ki->winner == node) {
+            /* Mark as dirty — winner is being removed, needs re-eval.
+             * Set winner to NULL so we can detect it in phase 3. */
+            ki->winner = NULL;
+        }
+
+        /* Remove from tips */
         dag_node_t *in_tips;
         HASH_FIND(hh_tips, dag->tips, hash, DAG_HASH_SIZE, in_tips);
         if (in_tips) {
             HASH_DELETE(hh_tips, dag->tips, in_tips);
+        }
+
+        /* Decrement parent refcounts.  If a parent's refcount hits 0
+         * and the parent is still in the DAG (and not being removed),
+         * it becomes a new tip. */
+        for (uint32_t j = 0; j < node->parent_count; j++) {
+            const uint8_t *parent_hash = node->parents + (j * DAG_HASH_SIZE);
+
+            hash_set_entry_t *ref;
+            HASH_FIND(hh, dag->referenced_as_parent, parent_hash,
+                      DAG_HASH_SIZE, ref);
+            if (!ref) continue;
+
+            ref->refcount--;
+            if (ref->refcount == 0) {
+                HASH_DELETE(hh, dag->referenced_as_parent, ref);
+                free(ref);
+
+                /* Parent might become a tip if it's still in the DAG
+                 * and not being removed in this batch */
+                hash_set_entry_t *in_remove;
+                HASH_FIND(hh, remove_set, parent_hash, DAG_HASH_SIZE, in_remove);
+                if (!in_remove) {
+                    dag_node_t *parent_node;
+                    HASH_FIND(hh, dag->nodes, parent_hash, DAG_HASH_SIZE, parent_node);
+                    if (parent_node) {
+                        dag_node_t *already_tip;
+                        HASH_FIND(hh_tips, dag->tips, parent_hash,
+                                  DAG_HASH_SIZE, already_tip);
+                        if (!already_tip) {
+                            HASH_ADD(hh_tips, dag->tips, hash,
+                                     DAG_HASH_SIZE, parent_node);
+                        }
+                    }
+                }
+            }
         }
 
         HASH_DELETE(hh, dag->nodes, node);
@@ -104,8 +163,18 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
         removed++;
     }
 
+    /* Cleanup remove set */
+    {
+        hash_set_entry_t *e, *etmp;
+        HASH_ITER(hh, remove_set, e, etmp) {
+            HASH_DELETE(hh, remove_set, e);
+            free(e);
+        }
+    }
+
     if (removed == 0) return 0;
 
+    /* Fast path: DAG is now empty */
     if (HASH_COUNT(dag->nodes) == 0) {
         HASH_CLEAR(hh_tips, dag->tips);
 
@@ -121,55 +190,37 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
         return removed;
     }
 
-    /* Rebuild referenced_as_parent */
+    /* Phase 3: Fix key_index entries whose winners were removed.
+     * Walk remaining nodes ONCE, updating only affected keys. */
     {
-        hash_set_entry_t *ref, *tmp;
-        HASH_ITER(hh, dag->referenced_as_parent, ref, tmp) {
-            HASH_DELETE(hh, dag->referenced_as_parent, ref);
-            free(ref);
-        }
-    }
+        dag_node_t *n, *ntmp;
+        HASH_ITER(hh, dag->nodes, n, ntmp) {
+            if (n->leader_seq == 0) continue;
 
-    dag_node_t *n, *ntmp;
-    HASH_ITER(hh, dag->nodes, n, ntmp) {
-        for (uint32_t j = 0; j < n->parent_count; j++) {
-            const uint8_t *parent_hash = n->parents + (j * DAG_HASH_SIZE);
-
-            hash_set_entry_t *existing;
-            HASH_FIND(hh, dag->referenced_as_parent, parent_hash,
-                      DAG_HASH_SIZE, existing);
-            if (!existing) {
-                existing = malloc(sizeof(hash_set_entry_t));
-                if (existing) {
-                    memcpy(existing->hash, parent_hash, DAG_HASH_SIZE);
-                    HASH_ADD(hh, dag->referenced_as_parent, hash,
-                             DAG_HASH_SIZE, existing);
-                }
+            key_index_entry_t *ki;
+            HASH_FIND(hh, dag->key_index, n->key, n->key_len, ki);
+            if (ki && ki->winner == NULL) {
+                /* This key's winner was removed — this node is a candidate */
+                ki->winner = n;
+            } else if (ki && ki->winner != NULL
+                       && ki->winner != n
+                       && dag_node_wins(n, ki->winner)) {
+                /* Only re-evaluate entries that had their winner removed,
+                 * but also update if we find a better winner */
+                /* winner is non-NULL here so it's already been set by
+                 * a previous node in this loop — just check if n is better */
+                ki->winner = n;
             }
         }
-    }
 
-    /* Rebuild tips */
-    HASH_CLEAR(hh_tips, dag->tips);
-
-    HASH_ITER(hh, dag->nodes, n, ntmp) {
-        hash_set_entry_t *is_parent;
-        HASH_FIND(hh, dag->referenced_as_parent, n->hash,
-                  DAG_HASH_SIZE, is_parent);
-        if (!is_parent) {
-            HASH_ADD(hh_tips, dag->tips, hash, DAG_HASH_SIZE, n);
-        }
-    }
-
-    /* Rebuild key index from remaining nodes.
-     * Fix #9: Don't gate on parent completeness — leader_seq determines
-     * the total order for reads, independent of DAG parentage.  Gating
-     * on parents_complete caused nodes with removed parents to vanish
-     * from the index, producing stale reads. */
-    key_index_clear(dag);
-    HASH_ITER(hh, dag->nodes, n, ntmp) {
-        if (n->leader_seq > 0) {
-            key_index_update(dag, n);
+        /* Remove key_index entries that still have NULL winner
+         * (no remaining node has that key with leader_seq > 0) */
+        key_index_entry_t *ki, *kitmp;
+        HASH_ITER(hh, dag->key_index, ki, kitmp) {
+            if (ki->winner == NULL) {
+                HASH_DEL(dag->key_index, ki);
+                free(ki);
+            }
         }
     }
 
@@ -258,8 +309,11 @@ dag_node_t *dag_add(merkle_dag_t *dag,
             ref = malloc(sizeof(hash_set_entry_t));
             if (ref) {
                 memcpy(ref->hash, parent_hash, DAG_HASH_SIZE);
+                ref->refcount = 1;
                 HASH_ADD(hh, dag->referenced_as_parent, hash, DAG_HASH_SIZE, ref);
             }
+        } else {
+            ref->refcount++;
         }
 
         dag_node_t *par = dag_find(dag, parent_hash);

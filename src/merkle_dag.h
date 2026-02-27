@@ -28,6 +28,7 @@ typedef struct dag_node {
 
 typedef struct {
     uint8_t hash[DAG_HASH_SIZE];
+    uint32_t refcount;               // number of child nodes referencing this parent
     UT_hash_handle hh;
 } hash_set_entry_t;
 
