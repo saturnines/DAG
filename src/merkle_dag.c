@@ -161,11 +161,6 @@ size_t dag_remove_by_hashes(merkle_dag_t *dag,
         }
     }
 
-    /* Rebuild key index from remaining nodes.
-     * Fix #9: Don't gate on parent completeness — leader_seq determines
-     * the total order for reads, independent of DAG parentage.  Gating
-     * on parents_complete caused nodes with removed parents to vanish
-     * from the index, producing stale reads. */
     key_index_clear(dag);
     HASH_ITER(hh, dag->nodes, n, ntmp) {
         if (n->leader_seq > 0) {
@@ -300,39 +295,42 @@ dag_node_t *dag_add(merkle_dag_t *dag,
         node->depth = max_depth;
         key_index_update(dag, node);
     } else {
-        /*
-         * Fix #8: Use UINT32_MAX sentinel for "depth unresolved"
-         * instead of 0.  Depth 0 is valid for root nodes, so using
-         * it as a sentinel caused the fix-up loop to skip real
-         * orphans whose parents happened to also be orphans at
-         * depth 0.  UINT32_MAX matches the convention in
-         * recompute_depth() for topo sort.
-         */
         node->depth = UINT32_MAX;
     }
 
     /* ---- Fix up orphans that this node completes ---- */
+    /*
+     * PERF FIX: Only scan for orphans if this node's hash is referenced
+     * as a parent by some existing node.  In the common case (new tip
+     * with no children waiting), this is an O(1) hash lookup that skips
+     * the entire O(n) scan.
+     */
     {
-        bool fixed_any = true;
-        while (fixed_any) {
-            fixed_any = false;
-            dag_node_t *child, *child_tmp;
-            HASH_ITER(hh, dag->nodes, child, child_tmp) {
-                if (child->parent_count == 0) continue;
-                if (child->depth != UINT32_MAX) continue;  /* Fix #8: sentinel */
-                if (!dag_parents_complete(dag, child)) continue;
+        hash_set_entry_t *is_needed;
+        HASH_FIND(hh, dag->referenced_as_parent, hash, DAG_HASH_SIZE, is_needed);
 
-                uint32_t max_d = 0;
-                for (uint32_t i = 0; i < child->parent_count; i++) {
-                    dag_node_t *par = dag_find(dag,
-                        child->parents + (i * DAG_HASH_SIZE));
-                    if (par && par->depth != UINT32_MAX
-                        && par->depth + 1 > max_d)
-                        max_d = par->depth + 1;
+        if (is_needed) {
+            bool fixed_any = true;
+            while (fixed_any) {
+                fixed_any = false;
+                dag_node_t *child, *child_tmp;
+                HASH_ITER(hh, dag->nodes, child, child_tmp) {
+                    if (child->parent_count == 0) continue;
+                    if (child->depth != UINT32_MAX) continue;  /* Fix #8: sentinel */
+                    if (!dag_parents_complete(dag, child)) continue;
+
+                    uint32_t max_d = 0;
+                    for (uint32_t i = 0; i < child->parent_count; i++) {
+                        dag_node_t *par = dag_find(dag,
+                            child->parents + (i * DAG_HASH_SIZE));
+                        if (par && par->depth != UINT32_MAX
+                            && par->depth + 1 > max_d)
+                            max_d = par->depth + 1;
+                    }
+                    child->depth = max_d;
+                    key_index_update(dag, child);
+                    fixed_any = true;
                 }
-                child->depth = max_d;
-                key_index_update(dag, child);
-                fixed_any = true;
             }
         }
     }
@@ -579,7 +577,7 @@ int dag_recover_from_arena(merkle_dag_t *dag) {
 
         size_t parents_size = pcount * DAG_HASH_SIZE;
         size_t total = 12 + klen + vlen + parents_size;
-        size_t aligned = (total + 7) & ~7;  // matches arena_alloc 8-byte alignment
+        size_t aligned = (total + 7) & ~7;
 
         if (offset + total > cap) break;
         if (klen > 1024 * 1024 || vlen > 16 * 1024 * 1024) break;
