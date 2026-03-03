@@ -456,37 +456,40 @@ size_t dag_count(merkle_dag_t *dag) {
 }
 
 // ============================================================================
-// Topo Sort
+// Topo Sort — leader_seq primary, no depth recomputation
 // ============================================================================
 
-static uint32_t recompute_depth(dag_node_t *node, merkle_dag_t *dag) {
+static uint32_t ensure_depth(dag_node_t *node, merkle_dag_t *dag) {
     if (node->depth != UINT32_MAX) return node->depth;
 
-    uint32_t max_parent_depth = 0;
-
+    uint32_t max_pd = 0;
     for (uint32_t i = 0; i < node->parent_count; i++) {
-        const uint8_t *parent_hash = node->parents + (i * DAG_HASH_SIZE);
-        dag_node_t *parent = dag_find(dag, parent_hash);
-
-        if (parent) {
-            uint32_t pd = recompute_depth(parent, dag);
-            if (pd + 1 > max_parent_depth) {
-                max_parent_depth = pd + 1;
-            }
+        dag_node_t *par = dag_find(dag, node->parents + (i * DAG_HASH_SIZE));
+        if (par) {
+            uint32_t pd = ensure_depth(par, dag);
+            if (pd != UINT32_MAX && pd + 1 > max_pd)
+                max_pd = pd + 1;
         }
     }
-
-    node->depth = max_parent_depth;
-    return max_parent_depth;
+    node->depth = max_pd;
+    return max_pd;
 }
 
-static int compare_nodes(const void *a, const void *b) {
-    dag_node_t *node_a = *(dag_node_t **)a;
-    dag_node_t *node_b = *(dag_node_t **)b;
+static int compare_nodes_fast(const void *a, const void *b) {
+    dag_node_t *na = *(dag_node_t **)a;
+    dag_node_t *nb = *(dag_node_t **)b;
 
-    if (node_a->depth < node_b->depth) return -1;
-    if (node_a->depth > node_b->depth) return 1;
-    return memcmp(node_a->hash, node_b->hash, DAG_HASH_SIZE);
+    if (na->leader_seq > 0 && nb->leader_seq > 0) {
+        if (na->leader_seq < nb->leader_seq) return -1;
+        if (na->leader_seq > nb->leader_seq) return 1;
+        return 0;
+    }
+    if (na->leader_seq > 0) return -1;
+    if (nb->leader_seq > 0) return 1;
+
+    if (na->depth < nb->depth) return -1;
+    if (na->depth > nb->depth) return 1;
+    return memcmp(na->hash, nb->hash, DAG_HASH_SIZE);
 }
 
 void dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx) {
@@ -499,24 +502,19 @@ void dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx) {
     size_t i = 0;
     dag_node_t *node, *tmp;
     HASH_ITER(hh, dag->nodes, node, tmp) {
-        node->depth = UINT32_MAX;
+        if (node->depth == UINT32_MAX)
+            ensure_depth(node, dag);
         nodes[i++] = node;
     }
 
-    for (size_t j = 0; j < count; j++) {
-        recompute_depth(nodes[j], dag);
-    }
+    qsort(nodes, count, sizeof(dag_node_t *), compare_nodes_fast);
 
-    qsort(nodes, count, sizeof(dag_node_t *), compare_nodes);
-
-    for (size_t j = 0; j < count; j++) {
+    for (size_t j = 0; j < count; j++)
         fn(nodes[j], ctx);
-    }
 
     free(nodes);
 }
 
-/* Temporary hash set for O(1) exclusion checks */
 typedef struct {
     uint8_t         hash[DAG_HASH_SIZE];
     UT_hash_handle  hh;
@@ -529,10 +527,9 @@ void dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
         return;
     }
 
-    size_t count = dag_count(dag);
-    if (count == 0) return;
+    size_t total = dag_count(dag);
+    if (total == 0) return;
 
-    /* Build O(1) exclusion set */
     excl_entry_t *excl_set = NULL;
     for (size_t i = 0; i < excl_count; i++) {
         excl_entry_t *e = malloc(sizeof(excl_entry_t));
@@ -541,29 +538,24 @@ void dag_iter_topo_excluding(merkle_dag_t *dag, dag_iter_fn fn, void *ctx,
         HASH_ADD(hh, excl_set, hash, DAG_HASH_SIZE, e);
     }
 
-    dag_node_t **nodes = malloc(count * sizeof(dag_node_t *));
+    dag_node_t **nodes = malloc(total * sizeof(dag_node_t *));
     if (!nodes) goto cleanup;
 
-    size_t i = 0;
+    size_t count = 0;
     dag_node_t *node, *tmp;
     HASH_ITER(hh, dag->nodes, node, tmp) {
-        node->depth = UINT32_MAX;
-        nodes[i++] = node;
-    }
-
-    for (size_t j = 0; j < count; j++) {
-        recompute_depth(nodes[j], dag);
-    }
-
-    qsort(nodes, count, sizeof(dag_node_t *), compare_nodes);
-
-    for (size_t j = 0; j < count; j++) {
         excl_entry_t *found = NULL;
-        HASH_FIND(hh, excl_set, nodes[j]->hash, DAG_HASH_SIZE, found);
-        if (!found) {
-            fn(nodes[j], ctx);
-        }
+        HASH_FIND(hh, excl_set, node->hash, DAG_HASH_SIZE, found);
+        if (found) continue;
+        if (node->depth == UINT32_MAX)
+            ensure_depth(node, dag);
+        nodes[count++] = node;
     }
+
+    qsort(nodes, count, sizeof(dag_node_t *), compare_nodes_fast);
+
+    for (size_t j = 0; j < count; j++)
+        fn(nodes[j], ctx);
 
     free(nodes);
 
