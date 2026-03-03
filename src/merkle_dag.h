@@ -28,6 +28,7 @@ typedef struct dag_node {
 
 typedef struct {
     uint8_t hash[DAG_HASH_SIZE];
+    uint32_t refcount;               // number of child nodes referencing this parent
     UT_hash_handle hh;
 } hash_set_entry_t;
 
@@ -71,19 +72,6 @@ void          dag_root_hash(merkle_dag_t *dag, uint8_t *out);
 size_t        dag_count(merkle_dag_t *dag);
 typedef void (*dag_iter_fn)(dag_node_t *node, void *ctx);
 void          dag_iter_topo(merkle_dag_t *dag, dag_iter_fn fn, void *ctx);
-
-// Durable arena backed by mmap'd file at `arena_path`.
-// Slab remains volatile — rebuilt on recovery.
-merkle_dag_t *dag_create_durable(size_t max_nodes, size_t arena_size,
-                                  const char *arena_path);
-
-// Walk the mmap'd arena, reconstruct hash tables and pool.
-// Call on startup before Raft. Returns number of nodes recovered.
-int dag_recover_from_arena(merkle_dag_t *dag);
-
-// Msync the arena range written by the last dag_add.
-// No-op if arena is not mmap-backed.
-int dag_msync(merkle_dag_t *dag, size_t offset, size_t len);
 
 /**
  * Iterate in topo order, skipping nodes whose hashes appear in the
